@@ -1,5 +1,5 @@
 # Copyright (c) Facebook, Inc. and its affiliates. All Rights Reserved
-
+import timm
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
@@ -115,6 +115,48 @@ class ResNet(torch.nn.Module):
             if isinstance(m, nn.BatchNorm2d):
                 m.eval()
 
+class VisionTransformer(torch.nn.Module):
+    """Vision Transformer from timms """
+    def __init__(self, input_shape):
+        super(VisionTransformer, self).__init__()
+        self.network = timm.create_model('deit_tiny_patch16_224',
+                                       pretrained=True,
+                                       num_classes=1000)
+        self.n_outputs = self.network.num_features
+
+        # Adapt number of channels for ARM
+        nc = input_shape[0]
+        if nc != 3:
+            target_layer = self.network.patch_embed.proj
+            tmp = self.network.patch_embed.proj.weight.data.clone()
+            self.network.patch_embed.proj = nn.Conv2d(
+                nc, target_layer.out_channels, kernel_size=target_layer.kernel_size,
+                stride=target_layer.stride, padding=target_layer.padding)
+
+            for i in range(nc):
+                self.network.patch_embed.proj.weight.data[:, i, :, :] = tmp[:, i % 3, :, :]
+
+        # save memory
+        del self.network.head
+        self.network.head = Identity()
+
+        self.freeze_bn()
+
+    def forward(self, x):
+        """Encode x into a feature vector of size n_outputs."""
+        return self.network(x)
+
+    def train(self, mode=True):
+        """
+        Override the default train() to freeze the BN parameters
+        """
+        super().train(mode)
+        self.freeze_bn()
+
+    def freeze_bn(self):
+        for m in self.network.modules():
+            if isinstance(m, nn.BatchNorm2d):
+                m.eval()
 
 class MNIST_CNN(nn.Module):
     """
@@ -189,8 +231,10 @@ def Featurizer(input_shape, hparams):
         return MNIST_CNN(input_shape)
     elif input_shape[1:3] == (32, 32):
         return wide_resnet.Wide_ResNet(input_shape, 16, 2, 0.)
+    # elif input_shape[1:3] == (224, 224): # temporary comment out for vit exp.
+    #     return ResNet(input_shape, hparams)
     elif input_shape[1:3] == (224, 224):
-        return ResNet(input_shape, hparams)
+        return VisionTransformer(input_shape)
     else:
         raise NotImplementedError
 
